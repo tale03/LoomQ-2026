@@ -10,6 +10,8 @@ from typing import Any, Dict, List, Tuple
 import os
 import tempfile
 
+from datetime import datetime, timezone
+
 SUPPORTED_TARGETS = ("spinq", "originq", "braket")
 
 
@@ -18,7 +20,6 @@ def transpile(qasm_str: str, target: str) -> str:
 
     if target == "braket":
         new_lines = []
-
         lines = qasm_str.split("\n")
         for line in lines:
             if line.strip().startswith("OPENQASM"):
@@ -37,24 +38,75 @@ def transpile(qasm_str: str, target: str) -> str:
                 number = parts[1].split("]")
                 line = f"bit[{number[0]}] c;"
 
-            if line.strip().startswith("cx"):
+            if line.strip().startswith("cx "):
                 line = line.replace("cx", "cnot")
 
-            if "measure q -> c" in line:
-                line = "c = measure q;"
+            if line.strip().startswith("measure") and "->" in line:
+                parts = line.strip().rstrip(";").split(" -> ")
+                line = f"{parts[1]} = {parts[0]};"
+
+            if line.strip().startswith("ccx "):
+                line = line.replace("ccx ", "ccnot ")
+
+            if line.strip().startswith("cu1("):
+                angle = line.split("(")[1].split(")")[0]
+                qubits = line.split(")")[1].strip().rstrip(";")
+                qa = qubits.split(",")[0].strip()
+                qb = qubits.split(",")[1].strip()
+
+                new_lines.append(f"rz({angle}/2) {qa};")
+                new_lines.append(f"cnot {qa}, {qb};")
+                new_lines.append(f"rz(-{angle}/2) {qb};")
+                new_lines.append(f"cnot {qa}, {qb};")
+                new_lines.append(f"rz({angle}/2) {qb};")
+                continue
+
+            if line.strip().startswith("sdg "):
+                qubit = line.strip().replace("sdg ", "").rstrip(";")
+                line = f"rz(-pi/2) {qubit};"
+
+            if line.strip().startswith("s "):
+                qubit = line.strip().replace("s ", "").rstrip(";")
+                line = f"rz(pi/2) {qubit};"
+
+            if line.strip().startswith("tdg "):
+                qubit = line.strip().replace("tdg ", "").rstrip(";")
+                line = f"rz(-pi/4) {qubit};"
+
+            if line.strip().startswith("t "):
+                qubit = line.strip().replace("t ", "").rstrip(";")
+                line = f"rz(pi/4) {qubit};"
 
             new_lines.append(line)
 
         result = "\n".join(new_lines)
-
         return result
 
     elif target == "spinq":
-        return qasm_str
+        new_lines = []
+        lines = qasm_str.split("\n")
+
+        for line in lines:
+            if line.strip().startswith("cu1("):
+                angle = line.split("(")[1].split(")")[0]
+                qubits = line.split(")")[1].strip().rstrip(";")
+                qa = qubits.split(",")[0].strip()
+                qb = qubits.split(",")[1].strip()
+                
+                new_lines.append(f"u1({angle}/2) {qa};")
+                new_lines.append(f"cx {qa}, {qb};")
+                new_lines.append(f"u1(-{angle}/2) {qb};")
+                new_lines.append(f"cx {qa}, {qb};")
+                new_lines.append(f"u1({angle}/2) {qb};")
+                continue
+            
+            new_lines.append(line)
+    
+        results = "\n".join(new_lines)
+        return results
 
     elif target == "originq":
         new_lines = []
-
         lines = qasm_str.split("\n")
         for line in lines:
             line = line.replace(";", "")
@@ -85,10 +137,39 @@ def transpile(qasm_str: str, target: str) -> str:
                 line = line.replace("measure ", "MEASURE ")
                 line = line.replace(" -> ", ",")
 
+            if line.strip().startswith("x "):
+                line = line.replace("x ", "X ")
+
+            if line.strip().startswith("swap "):
+                line = line.replace("swap ", "SWAP ")
+
+            if line.strip().startswith("sdg "):
+                line = line.replace("sdg ", "SDAG ")
+
+            if line.strip().startswith("s "):
+                line = line.replace("s ", "S ")
+
+            if line.strip().startswith("tdg "):
+                line = line.replace("tdg ", "TDAG ")
+
+            if line.strip().startswith("t "):
+                line = line.replace("t ", "T ")
+
+            if line.strip().startswith("ccx "):
+                line = line.replace("ccx ", "TOFFOLI ")
+
+            if "rz(" in line:
+                line = line.replace("rz(", "RZ(")
+
+            if "ry(" in line:
+                line = line.replace("ry(", "RY(")
+
+            if "cu1(" in line:
+                line = line.replace("cu1(", "CU1(")
+
             new_lines.append(line)
 
-        result = "\n".join(new_lines)
-            
+        result = "\n".join(new_lines)   
         return result
         
 
@@ -113,9 +194,9 @@ def run(qasm_str: str, target: str, shots: int) -> Dict[str, Any]:
         "backend": "braket_local_simulator",
         "job_id": result.task_metadata.id,
         "shots": shots,
-        "counts": counts,
+        "counts": dict(counts),
         "bit_order": "little",
-        "timestamp": "2026-08-05T-17:19:00Z"
+        "timestamp": datetime.now(timezone.utc).isoformat()
         }
 
     elif target == "spinq":
@@ -144,9 +225,9 @@ def run(qasm_str: str, target: str, shots: int) -> Dict[str, Any]:
             "backend": "spinq_basic_simulator",
             "job_id": "spinq-local",
             "shots": shots,
-            "counts": counts,
+            "counts": dict(counts),
             "bit_order": "little",
-            "timestamp": "2026-08-06T-06:51:00Z"
+            "timestamp": datetime.now(timezone.utc).isoformat()
         }
 
     elif target == "originq":
@@ -181,7 +262,8 @@ def run(qasm_str: str, target: str, shots: int) -> Dict[str, Any]:
         num_bits = len(creg)
         for key, val in raw_counts.items():
             trimmed = key[-num_bits:]  
-            formatted_counts[trimmed] = val
+            reversed_key = trimmed[::-1]
+            formatted_counts[reversed_key] = val
 
     # 5. 释放量子虚拟机器资源
     machine.finalize()
@@ -192,7 +274,7 @@ def run(qasm_str: str, target: str, shots: int) -> Dict[str, Any]:
         "shots": shots,
         "counts": formatted_counts,
         "bit_order": "little",
-        "timestamp": "2026-08-06T-07:31:00Z"
+        "timestamp": datetime.now(timezone.utc).isoformat()
     }
 
 
