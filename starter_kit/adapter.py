@@ -280,7 +280,45 @@ def run(qasm_str: str, target: str, shots: int) -> Dict[str, Any]:
 
 def agent_chat(prompt: str) -> str:
     """Optional L2 entry point using the documented LOOMQ_LLM_* environment."""
-    raise NotImplementedError("L2 is optional; implement agent_chat(prompt) to enter")
+
+    from llm_client import chat_completion
+
+    system_prompt = """You are a quantum computing assistant. You help users by:
+    1. Generating valid OpenQASM 2.0 circuits
+    2. Fixing broken QASM code  
+    3. Recommending quantum backends
+
+    Rules for generating QASM:
+    - Always start with: OPENQASM 2.0;  and  include "qelib1.inc";
+    - Declare qreg and creg before using them
+    - Only use these 12 gates: h, x, s, sdg, t, tdg, rz(θ), ry(θ), cx, cu1(θ), swap, ccx
+    - Always end with measure statements
+    - Return the complete QASM code in a ```qasm code block
+
+    Rules for fixing QASM:
+    - Fix syntax errors (wrong case, missing semicolons, undeclared registers)
+    - Preserve the user's intended circuit purpose
+    - Return the corrected complete QASM code
+
+    Backend capabilities (use ONLY this data for backend selection):
+    - spinq_taurus_simulator: max 24 qubits, no queue, free, no account needed, local
+    - spinq_cloud_qpu: max 8 qubits, queue minutes to hours, free quota, account needed
+    - originq_local_simulator: max 30 qubits, no queue, free, no account needed, local
+    - originq_wukong: max 72 qubits, queue hours, free quota, account needed
+    - braket_local_simulator: max 25 qubits, no queue, free, no account needed, local
+    - braket_cloud: max 34 qubits, queue minutes to hours, paid, account needed
+
+    When recommending a backend, return the exact backend id (e.g. braket_local_simulator).
+    Reply in the same language the user uses.
+    """
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": prompt}
+    ]
+
+    result = chat_completion(messages)
+    return result["choices"][0]["message"]["content"]   
 
 
 def compile_hybrid(hybrid_qasm_str: str) -> Tuple[List[str], str]:
