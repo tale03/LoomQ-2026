@@ -282,6 +282,7 @@ def agent_chat(prompt: str) -> str:
     """Optional L2 entry point using the documented LOOMQ_LLM_* environment."""
 
     from llm_client import chat_completion
+    import re
 
     system_prompt = """You are a quantum computing assistant. You help users by:
     1. Generating valid OpenQASM 2.0 circuits
@@ -316,9 +317,24 @@ def agent_chat(prompt: str) -> str:
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": prompt}
     ]
+    
+    for attempt in range(3):
+        result = chat_completion(messages)
+        reply = result["choices"][0]["message"]["content"]
 
-    result = chat_completion(messages)
-    return result["choices"][0]["message"]["content"]   
+        match = re.search(r"```(?:qasm)?\s*\n(.*?)```", reply, re.DOTALL)
+        if not match:
+            return reply 
+        qasm_code = match.group(1).strip()
+
+        try:
+            transpile(qasm_code, "spinq")  
+            return reply  
+        except Exception as e:
+            messages.append({"role": "assistant", "content": reply})
+            messages.append({"role": "user", "content": f"QASM error: {e}. Please fix the code. Reply in the same language as my original question."})
+
+    return reply 
 
 
 def compile_hybrid(hybrid_qasm_str: str) -> Tuple[List[str], str]:
