@@ -265,17 +265,17 @@ def run(qasm_str: str, target: str, shots: int) -> Dict[str, Any]:
             reversed_key = trimmed[::-1]
             formatted_counts[reversed_key] = val
 
-    # 5. 释放量子虚拟机器资源
-    machine.finalize()
+        # 5. 释放量子虚拟机器资源
+        machine.finalize()
 
-    return {
-        "backend": "originq_cpu_simulator",
-        "job_id": "originq-sim-job-local",
-        "shots": shots,
-        "counts": formatted_counts,
-        "bit_order": "little",
-        "timestamp": datetime.now(timezone.utc).isoformat()
-    }
+        return {
+            "backend": "originq_cpu_simulator",
+            "job_id": "originq-sim-job-local",
+            "shots": shots,
+            "counts": formatted_counts,
+            "bit_order": "little",
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
 
 
 def agent_chat(prompt: str) -> str:
@@ -317,7 +317,7 @@ def agent_chat(prompt: str) -> str:
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": prompt}
     ]
-    
+
     for attempt in range(3):
         result = chat_completion(messages)
         reply = result["choices"][0]["message"]["content"]
@@ -337,8 +337,167 @@ def agent_chat(prompt: str) -> str:
     return reply 
 
 
+# Helper functions for L3
+def convert_var(var):
+    if var.startswith("r"):
+        return var.replace("r", "x")
+    elif var.startswith("c["):
+        number = int(var.split("[")[1].rstrip("]")) + 10
+        return f"x{number}"
+    else:
+        return var
+
+def translate_assignment(line):
+    line = line.strip().rstrip(";")
+    left, right = line.split("=")
+    left = left.strip()
+    right = right.strip()    
+
+    rd = convert_var(left)
+
+    if right.isdigit() or (right.startswith("-") and right[1:].isdigit()):
+        return f"li {rd}, {right}"
+
+    elif "+" in right:
+        parts = right.split("+")
+        a = parts[0].strip()
+        b = parts[1].strip()
+
+        a_is_num = a.isdigit() or (a.startswith("-") and a[1:].isdigit())
+        b_is_num = b.isdigit() or (b.startswith("-") and b[1:].isdigit())
+
+        if a_is_num and b_is_num:
+            return f"li {rd}, {int(a) + int(b)}"
+        elif a_is_num:
+            return f"addi {rd}, {convert_var(b)}, {a}"
+        elif b_is_num:
+            return f"addi {rd}, {convert_var(a)}, {b}"
+        else:
+            return f"add {rd}, {convert_var(a)}, {convert_var(b)}"
+
+    elif "-" in right:
+        parts = right.split("-")
+        a = parts[0].strip()
+        b = parts[1].strip()
+        
+        a_is_num = a.isdigit() or (a.startswith("-") and a[1:].isdigit())
+        b_is_num = b.isdigit() or (b.startswith("-") and b[1:].isdigit())
+        
+        if a_is_num and b_is_num:
+            return f"li {rd}, {int(a) - int(b)}"
+        elif b_is_num:
+            return f"addi {rd}, {convert_var(a)}, -{b}"
+        elif a_is_num:
+            raise ValueError(f"Cannot compile: {line}")
+        else:
+            return f"sub {rd}, {convert_var(a)}, {convert_var(b)}"
+
+def translate_classical(classical_lines):
+    output = []
+    label_counter = 0
+    i = 0
+
+    while i < len(classical_lines):
+        line = classical_lines[i].strip()
+
+        if line.startswith("if"):
+            condition = line[line.index("(")+1 : line.rindex(")")]
+
+            if "==" in condition:
+                left, right = condition.split("==")
+                branch = "bne"  # jump if NOT equal
+            else:
+                left, right = condition.split("!=")
+                branch = "beq"  # jump if equal
+
+            left = left.strip()
+            right = right.strip()
+
+            end_label = f"END_{label_counter}"
+
+            output.append(f"li x20, {right}")
+            branch_line_idx = len(output)
+            output.append(f"{branch} {convert_var(left)}, x20, PLACEHOLDER")
+
+            # process "if true" body:
+            i += 1
+            while i < len(classical_lines):
+                inner = classical_lines[i].strip()
+
+                if inner.startswith("}"):
+                    break
+                output.append(translate_assignment(inner))
+                i += 1
+
+            # check for else
+            if i < len(classical_lines) and "else" in classical_lines[i]:
+                else_label = f"ELSE_{label_counter}"
+                output[branch_line_idx] = output[branch_line_idx].replace("PLACEHOLDER", else_label)
+                output.append(f"j {end_label}")
+                output.append(f"{else_label}:")
+                i += 1
+
+                while i < len(classical_lines):
+                    inner = classical_lines[i].strip()
+
+                    if inner == "}":
+                        break
+
+                    output.append(translate_assignment(inner))
+                    i += 1
+            else:
+                output[branch_line_idx] = output[branch_line_idx].replace("PLACEHOLDER", end_label)
+
+            output.append(f"{end_label}:")
+            label_counter += 1
+            i += 1
+
+        else:
+            output.append(translate_assignment(line))
+            i += 1
+
+    return "\n".join(output)
+
+
 def compile_hybrid(hybrid_qasm_str: str) -> Tuple[List[str], str]:
     """Optional L3 entry point. Return quantum operations and RISC-V assembly."""
-    raise NotImplementedError(
-        "L3 is optional; implement compile_hybrid(hybrid_qasm_str) to enter"
-    )
+    hybrid_qasm_str = hybrid_qasm_str.replace("{", "{\n")
+    hybrid_qasm_str = hybrid_qasm_str.replace("}", "\n}\n")
+    hybrid_qasm_str = hybrid_qasm_str.replace(";", ";\n")
+
+
+    hybrid_qasm_str = hybrid_qasm_str.replace("}\n else", "} else")
+    hybrid_qasm_str = hybrid_qasm_str.replace("}\nelse", "} else")
+
+    quantum_ops = []
+    classical_lines = []
+    inside_classical = False
+    brace_count = 0
+
+    for line in hybrid_qasm_str.split("\n"):
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        if stripped.startswith("OPENQASM") or stripped.startswith("include") or stripped.startswith("qreg") or stripped.startswith("creg"):
+            continue  
+
+        if stripped.startswith("classical"):
+            inside_classical = True
+            brace_count = 1
+            continue
+
+        if inside_classical:
+            brace_count += stripped.count("{") - stripped.count("}")
+            if brace_count <= 0:
+                inside_classical = False
+                continue
+            classical_lines.append(stripped)
+        else:
+            if stripped:
+                quantum_ops.append(stripped.rstrip(";"))
+
+    riscv_asm = translate_classical(classical_lines)
+
+    return(quantum_ops, riscv_asm)
+      
