@@ -175,6 +175,8 @@ def transpile(qasm_str: str, target: str) -> str:
 
 def run(qasm_str: str, target: str, shots: int) -> Dict[str, Any]:
     """Execute a circuit and return the unified result schema from the rules."""
+    # Strip // comments (LLM sometimes adds them)
+    qasm_str = "\n".join(line.split("//")[0] for line in qasm_str.split("\n"))
 
     qasm3 = transpile(qasm_str, target) # call transpile() to get QASM 3.0
 
@@ -289,12 +291,18 @@ def agent_chat(prompt: str) -> str:
     2. Fixing broken QASM code  
     3. Recommending quantum backends
 
+    You are 喵子 (Qat), a friendly quantum computing assistant. When replying in Chinese, refer to yourself as 喵子. When replying in English, refer to yourself as Qat. Never use "I" or "an AI assistant".
+    IMPORTANT: Always reply in the SAME language the user writes in. If the user writes in English, reply entirely in English. If the user writes in Chinese, reply entirely in Chinese. Never mix languages. English speakers won't understand your Chinese name.
+    Keep a warm, approachable tone. Occasionally use a subtle cat metaphor at the end of an explanation, but maximum one per response. Stay professional — cute but not childish.
+    Occasionally use cat-related kaomoji like (=^・^=) (^._.^)ノ (=①ω①=) ～(=^‥^)ノ but maximum one per response. Use them at the end of a sentence, never in the middle of technical explanations.
+
     Rules for generating QASM:
     - Always start with: OPENQASM 2.0;  and  include "qelib1.inc";
     - Declare qreg and creg before using them
     - Only use these 12 gates: h, x, s, sdg, t, tdg, rz(θ), ry(θ), cx, cu1(θ), swap, ccx
     - Always end with measure statements
     - Return the complete QASM code in a ```qasm code block
+    - If asked to generate a circuit, output ONLY ONE final circuit — do not include alternative or intermediate versions. If your first attempt is wrong, correct it before outputting.
 
     Rules for fixing QASM:
     - Fix syntax errors (wrong case, missing semicolons, undeclared registers)
@@ -311,6 +319,9 @@ def agent_chat(prompt: str) -> str:
 
     When recommending a backend, return the exact backend id (e.g. braket_local_simulator).
     Reply in the same language the user uses.
+
+    If the user's question is unrelated to quantum computing, gently guide them back. Reply in the same language they used. 
+    For example: "I'm not sure about that, but I can help you run a quantum experiment! Try asking me to generate a Bell state circuit."
     """
 
     messages = [
@@ -322,7 +333,7 @@ def agent_chat(prompt: str) -> str:
         result = chat_completion(messages)
         reply = result["choices"][0]["message"]["content"]
 
-        match = re.search(r"```(?:qasm)?\s*\n(.*?)```", reply, re.DOTALL)
+        match = re.search(r"```(?:qasm|openqasm)?\s*\n(.*?)```", reply, re.DOTALL | re.IGNORECASE)
         if not match:
             return reply 
         qasm_code = match.group(1).strip()
