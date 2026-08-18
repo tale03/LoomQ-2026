@@ -180,6 +180,15 @@ def run(qasm_str: str, target: str, shots: int) -> Dict[str, Any]:
 
     qasm3 = transpile(qasm_str, target) # call transpile() to get QASM 3.0
 
+    gate_lines = [l for l in qasm_str.split('\n') 
+              if l.strip() 
+              and not l.strip().startswith(('OPENQASM', 'include', 'qreg', 'creg', 'measure', '//'))]
+              
+    meta = {
+        "transpiled_gates": len(gate_lines),
+        "depth": len(gate_lines)  # 简单近似，不精确但够用
+    }
+
     if target == "braket":
         from braket.devices import LocalSimulator
         from braket.ir.openqasm import Program
@@ -193,12 +202,13 @@ def run(qasm_str: str, target: str, shots: int) -> Dict[str, Any]:
         counts = result.measurement_counts
 
         return {
-        "backend": "braket_local_simulator",
-        "job_id": result.task_metadata.id,
-        "shots": shots,
-        "counts": dict(counts),
-        "bit_order": "little",
-        "timestamp": datetime.now(timezone.utc).isoformat()
+            "backend": "braket_local_simulator",
+            "job_id": "braket-local",
+            "shots": shots,
+            "counts": dict(counts),
+            "bit_order": "little",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "meta": meta
         }
 
     elif target == "spinq":
@@ -224,12 +234,13 @@ def run(qasm_str: str, target: str, shots: int) -> Dict[str, Any]:
         counts = result.counts
 
         return {
-            "backend": "spinq_basic_simulator",
-            "job_id": "spinq-local",
+            "backend": "spinq_taurus_simulator",
+            "job_id": "spinq-local-" + datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S"),
             "shots": shots,
             "counts": dict(counts),
             "bit_order": "little",
-            "timestamp": datetime.now(timezone.utc).isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "meta": meta
         }
 
     elif target == "originq":
@@ -271,12 +282,13 @@ def run(qasm_str: str, target: str, shots: int) -> Dict[str, Any]:
         machine.finalize()
 
         return {
-            "backend": "originq_cpu_simulator",
-            "job_id": "originq-sim-job-local",
+            "backend": "originq_local_simulator",
+            "job_id": "originq-local-" + datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S"),
             "shots": shots,
             "counts": formatted_counts,
             "bit_order": "little",
-            "timestamp": datetime.now(timezone.utc).isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "meta": meta
         }
 
 
@@ -291,18 +303,23 @@ def agent_chat(prompt: str) -> str:
     2. Fixing broken QASM code  
     3. Recommending quantum backends
 
-    You are 喵子 (Qat), a friendly quantum computing assistant. When replying in Chinese, refer to yourself as 喵子. When replying in English, refer to yourself as Qat. Never use "I" or "an AI assistant".
+    You are 喵子/Qat (use the Chinese or English version of the name depending on the user's language: use 喵子 when the user uses Chinese, Qat when the user uses English), a friendly quantum computing assistant. When replying in Chinese, refer to yourself as 喵子. When replying in English, refer to yourself as Qat. Never use "I" or "an AI assistant".
     IMPORTANT: Always reply in the SAME language the user writes in. If the user writes in English, reply entirely in English. If the user writes in Chinese, reply entirely in Chinese. Never mix languages. English speakers won't understand your Chinese name.
     Keep a warm, approachable tone. Occasionally use a subtle cat metaphor at the end of an explanation, but maximum one per response. Stay professional — cute but not childish.
-    Occasionally use cat-related kaomoji like (=^・^=) (^._.^)ノ (=①ω①=) ～(=^‥^)ノ but maximum one per response. Use them at the end of a sentence, never in the middle of technical explanations.
+    Occasionally use cat-related kaomoji, but maximum one per response. Use them at the end of a sentence, never in the middle of technical explanations.
+
+    If the user greets in "hi" or use some casual greeting in English that's used internationally, answer your full answer in Chinses once, then full in English once.
 
     Rules for generating QASM:
     - Always start with: OPENQASM 2.0;  and  include "qelib1.inc";
     - Declare qreg and creg before using them
     - Only use these 12 gates: h, x, s, sdg, t, tdg, rz(θ), ry(θ), cx, cu1(θ), swap, ccx
     - Always end with measure statements
-    - Return the complete QASM code in a ```qasm code block
+    - ALWAYS return the complete QASM code in a ```qasm code block
     - If asked to generate a circuit, output ONLY ONE final circuit — do not include alternative or intermediate versions. If your first attempt is wrong, correct it before outputting.
+
+    When writing QASM code, always use lowercase gate names: h, x, y, z, s, t, cx, cz, ccx, swap. Never use uppercase like H, CX, X.
+    When you generate QASM code, always remind the user to click the "run"/"运行" (depends on user's language) button below the code block to execute it and see the result.
 
     Rules for fixing QASM:
     - Fix syntax errors (wrong case, missing semicolons, undeclared registers)
@@ -317,7 +334,8 @@ def agent_chat(prompt: str) -> str:
     - braket_local_simulator: max 25 qubits, no queue, free, no account needed, local
     - braket_cloud: max 34 qubits, queue minutes to hours, paid, account needed
 
-    When recommending a backend, return the exact backend id (e.g. braket_local_simulator).
+    When recommending a backend, return the exact backend identifier from the capability table, such as braket_local_simulator, spinq_cloud, originq_cloud.
+    
     Reply in the same language the user uses.
 
     If the user's question is unrelated to quantum computing, gently guide them back. Reply in the same language they used. 
@@ -335,7 +353,13 @@ def agent_chat(prompt: str) -> str:
 
         match = re.search(r"```(?:qasm|openqasm)?\s*\n(.*?)```", reply, re.DOTALL | re.IGNORECASE)
         if not match:
-            return reply 
+            # Fallback: find QASM code without backticks
+            match = re.search(r"(OPENQASM\s+2\.0;.*?(?:measure\s+.*?;))", reply, re.DOTALL | re.IGNORECASE)
+            if match:
+                # Wrap bare code in backticks so frontend can detect it
+                reply = reply.replace(match.group(1), "\n```qasm\n" + match.group(1) + "\n```\n")
+        if not match:
+            return reply
         qasm_code = match.group(1).strip()
 
         try:
@@ -511,4 +535,3 @@ def compile_hybrid(hybrid_qasm_str: str) -> Tuple[List[str], str]:
     riscv_asm = translate_classical(classical_lines)
 
     return(quantum_ops, riscv_asm)
-      
